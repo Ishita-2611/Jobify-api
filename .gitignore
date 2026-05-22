@@ -1,0 +1,34 @@
+# Environment variables
+.env
+.env.local
+.env.*.local
+
+# Secrets & credentials
+credentials.json
+gmail_token.json
+linkedin_session.json
+
+# Resume
+resume.pdf
+
+# Logs & generated files
+applications_log.csv
+*.log
+npm-debug.log*
+
+# Dependencies
+node_modules/
+
+# IDE & OS
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# Temp files
+tmp/
+temp/
+*.tmp
