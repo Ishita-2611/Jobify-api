@@ -26,6 +26,10 @@ async function searchLinkedIn(keywords) {
 
     const page = await context.newPage();
 
+    // Set longer timeout for page loads
+    page.setDefaultTimeout(60000);
+    page.setDefaultNavigationTimeout(60000);
+
     // Search LinkedIn posts for each keyword
     const allResults = [];
     const keywords_str = keywords.join(' OR ');
@@ -33,44 +37,95 @@ async function searchLinkedIn(keywords) {
     // LinkedIn search URL (posts from last 24 hours)
     const searchUrl = `https://www.linkedin.com/search/results/posts/?keywords=${encodeURIComponent(keywords_str)}&sortBy=DATE_POSTED`;
     
-    await page.goto(searchUrl, { waitUntil: 'networkidle', timeout: 30000 });
+    await page.goto(searchUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
+    
+    // Wait a bit more for dynamic content
+    await page.waitForTimeout(3000);
+    
+    // Check if we're logged in or redirected
+    const pageUrl = page.url();
+    console.log(`[LinkedIn] Loaded URL: ${pageUrl}`);
+    
+    // Try various waits for post elements
+    await page.waitForSelector('div[class*="feed"], article, [data-id^="urn:li:activity:"], div[data-component-type="feed"]', { timeout: 5000 }).catch(() => null);
     
     // Wait for posts to load
-    await page.waitForSelector('div[data-component-type="feed"]', { timeout: 10000 }).catch(() => null);
+    await page.waitForTimeout(2000);
 
-    // Extract posts
+    // Extract posts with fallback selectors
     const posts = await page.evaluate(() => {
-      const postElements = document.querySelectorAll('[data-id^="urn:li:activity:"]');
       const results = [];
+      const debug = {};
+      
+      // Log page structure
+      debug.bodyClasses = document.body.className;
+      debug.allDivs = document.querySelectorAll('div').length;
+      debug.allArticles = document.querySelectorAll('article').length;
+      
+      // Try multiple selectors for posts
+      let postElements = document.querySelectorAll('[data-id^="urn:li:activity:"]');
+      debug.urnLiActivity = postElements.length;
+      
+      // Fallback if no posts found with above selector
+      if (postElements.length === 0) {
+        postElements = document.querySelectorAll('div[class*="feed-item"]');
+        debug.feedItem = postElements.length;
+      }
+      
+      // Another fallback
+      if (postElements.length === 0) {
+        postElements = document.querySelectorAll('article');
+        debug.articles = postElements.length;
+      }
+      
+      // Try searching for containers with text content
+      if (postElements.length === 0) {
+        postElements = document.querySelectorAll('div[data-component-type*="feed"], div[class*="update"]');
+        debug.feedComponent = postElements.length;
+      }
+      
+      debug.totalElements = postElements.length;
 
-      postElements.forEach((element) => {
+      postElements.forEach((element, index) => {
         const postText = element.innerText || '';
+        
+        if (!postText.trim()) return;
         
         // Try to find email in post text
         const emailRegex = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g;
         const emails = postText.match(emailRegex) || [];
         
-        // Extract recruiter name (usually in post header)
-        const headerElement = element.querySelector('[aria-label*="posted"]');
-        let recruiterName = headerElement?.innerText?.split('\n')[0] || 'Unknown';
+        // Extract recruiter name (usually in post header or first line)
+        let recruiterName = 'Unknown';
+        const lines = postText.split('\n');
+        if (lines.length > 0) {
+          recruiterName = lines[0].substring(0, 50) || 'Unknown';
+        }
 
         // Get post URL
-        const linkElement = element.querySelector('a[href*="/posts/"]') || element.querySelector('a[href*="/feed/"]');
+        const linkElement = element.querySelector('a[href*="/posts/"]') || 
+                          element.querySelector('a[href*="/feed/"]') ||
+                          element.querySelector('a[href*="linkedin"]');
         const postUrl = linkElement?.href || window.location.href;
 
-        results.push({
-          postText,
-          recruiterName,
-          emails,
-          postUrl
-        });
+        if (emails.length > 0) {
+          results.push({
+            postText: postText.substring(0, 200),
+            recruiterName,
+            emails,
+            postUrl
+          });
+        }
       });
 
-      return results;
+      return { results, pageTitle: document.title, elementCount: postElements.length, debug };
     });
 
+    console.log(`[LinkedIn Search] Debug:`, posts.debug);
+    console.log(`[LinkedIn Search] Found ${posts.elementCount} elements, ${posts.results.length} with emails`);
+    
     // Format results
-    for (const post of posts) {
+    for (const post of posts.results) {
       if (post.emails.length > 0) {
         for (const email of post.emails) {
           allResults.push({

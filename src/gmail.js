@@ -33,25 +33,31 @@ async function getGmailClient() {
   }
 
   // First run: need user authorization
-  console.log('First run: authorizing Gmail...');
+  // For now, throw an error with instructions
   const authUrl = oauth2Client.generateAuthUrl({
     access_type: 'offline',
     scope: SCOPES
   });
 
-  console.log('\n📧 Open this URL to authorize Gmail:');
-  console.log(authUrl);
-  console.log('\nAfter authorizing, copy the authorization code and paste it below.\n');
-
-  // For headless/programmatic auth, you'd need to handle the callback differently
-  // For now, we'll use a simple approach that requires manual intervention
-  const { google_auth_code } = require('readline-sync').question('Enter the authorization code: ', { hideEchoBack: false });
+  const instructions = `
+  ========================================
+  Gmail Authorization Required
+  ========================================
   
-  const { tokens } = await oauth2Client.getToken(google_auth_code);
-  fs.writeFileSync(TOKEN_FILE, JSON.stringify(tokens));
-  oauth2Client.setCredentials(tokens);
+  1. Open this URL in your browser:
+  ${authUrl}
+  
+  2. Authorize the application
+  
+  3. Copy the authorization code from the URL
+  
+  4. Run this command:
+     node -e "const {google}=require('googleapis'); const {OAuth2}=google.auth; const creds=require('./credentials.json').installed; const client=new OAuth2(creds.client_id,creds.client_secret,creds.redirect_uris[0]); const readline=require('readline'); const rl=readline.createInterface({input:process.stdin,output:process.stdout}); rl.question('Paste authorization code: ',async code=>{const {tokens}=await client.getToken(code); require('fs').writeFileSync('gmail_token.json',JSON.stringify(tokens)); console.log('✅ Token saved!'); process.exit();});"
+  
+  ========================================
+  `;
 
-  return oauth2Client;
+  throw new Error(instructions);
 }
 
 module.exports = { getGmailClient };
