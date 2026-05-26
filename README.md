@@ -1,173 +1,204 @@
-# Job Applier API — Quick Start
+# Jobify API
 
-Your job automation engine is **LIVE** and ready to use! 🚀
+Jobify is a Node.js automation API that helps search LinkedIn job posts, extract visible recruiter email addresses, and send a formal Gmail application email with a resume attachment.
 
----
+It is built with a review-first flow: searches and previews happen first, and emails are only sent when `confirmSend=true` is provided.
 
-## **Server Status**
+## What It Does
 
-✅ **ACTIVE** at `http://localhost:3000`
+- Logs in to LinkedIn using credentials from `.env` and saves a reusable session.
+- Searches LinkedIn posts by keywords such as `Software Engineer`, `Java Developer`, or `Contract`.
+- Filters for recent LinkedIn post text, currently up to 24 hours where LinkedIn exposes timestamps like `2h`, `12 hours`, or `just now`.
+- Extracts recruiter emails that are visibly present in the post/job text.
+- Sends Gmail application emails with candidate details and attached resume.
+- Logs sent, skipped, and failed applications to `applications_log.csv`.
 
-**Check status:**
+Important: Jobify cannot guess hidden recruiter emails. It only extracts emails visible in LinkedIn text, such as `hr@company.com`.
+
+## Setup
+
+Install dependencies:
+
+```bash
+npm install
+```
+
+Create `.env` in the project root:
+
+```env
+CANDIDATE_NAME=Your Name
+CANDIDATE_EMAIL=your.gmail@gmail.com
+CANDIDATE_PHONE=+91-XXXXXXXXXX
+RESUME_PATH=resume.pdf
+
+LINKEDIN_EMAIL=your_linkedin_email
+LINKEDIN_PASS=your_linkedin_password
+
+PORT=3000
+```
+
+Place these files in the project root:
+
+- `resume.pdf`
+- `credentials.json` from Google Cloud OAuth credentials
+
+## Gmail Setup
+
+Enable the Gmail API in your Google Cloud project, then authorize Gmail:
+
+```bash
+npm run gmail-auth
+```
+
+This opens a browser OAuth flow and saves:
+
+```text
+gmail_token.json
+```
+
+If Google shows `Error 403: access_denied`, add your Gmail address as a test user in Google Cloud:
+
+```text
+APIs & Services -> OAuth consent screen -> Test users
+```
+
+## LinkedIn Setup
+
+Save a LinkedIn browser session:
+
+```bash
+npm run login
+```
+
+The script opens LinkedIn, fills credentials from `.env`, and saves:
+
+```text
+linkedin_session.json
+```
+
+If LinkedIn asks for captcha, 2FA, or checkpoint verification, complete it in the opened browser.
+
+## Run
+
+Start the API:
+
+```bash
+npm start
+```
+
+Development mode:
+
+```bash
+npm run dev
+```
+
+Run tests:
+
+```bash
+npm test
+```
+
+## API
+
+### Status
+
 ```bash
 curl http://localhost:3000/api/status
 ```
 
----
+Checks whether resume, Gmail token, Gmail credentials, and LinkedIn session files exist.
 
-## **API Routes**
+### Search LinkedIn Without Sending
 
-### 1️⃣ **Search LinkedIn** (Dry Run)
 ```bash
-curl -X POST http://localhost:3000/api/search \
-  -H "Content-Type: application/json" \
-  -d '{"keywords":["Python Developer","Remote"]}'
-```
-**Returns:** Matching posts with recruiter emails
-
----
-
-### 2️⃣ **Search + Send Emails** (Full Automation)
-```bash
-curl -X POST http://localhost:3000/api/apply \
-  -H "Content-Type: application/json" \
-  -d '{"keywords":["Java Developer","Contract"]}'
-```
-**Does:**
-1. Searches LinkedIn for keywords
-2. Extracts recruiter emails
-3. Sends your resume to each
-4. Logs all applications
-
----
-
-### 3️⃣ **Send One Email**
-```bash
-curl -X POST http://localhost:3000/api/apply/single \
-  -H "Content-Type: application/json" \
-  -d '{
-    "to":"recruiter@company.com",
-    "recruiterName":"Jane Doe",
-    "jobTitle":"Python Developer",
-    "postUrl":"https://linkedin.com/posts/123"
-  }'
+curl -X POST http://localhost:3000/api/search ^
+  -H "Content-Type: application/json" ^
+  -d "{\"keywords\":[\"Software Engineer\"]}"
 ```
 
----
+Returns matching LinkedIn results with extracted recruiter emails. No email is sent.
 
-### 4️⃣ **View All Logs**
+### Preview Applications
+
+```bash
+curl -X POST http://localhost:3000/api/apply ^
+  -H "Content-Type: application/json" ^
+  -d "{\"keywords\":[\"Java Developer\",\"Contract\"]}"
+```
+
+This searches LinkedIn and returns what is ready to send. No email is sent without confirmation.
+
+### Send Applications
+
+```bash
+curl -X POST http://localhost:3000/api/apply ^
+  -H "Content-Type: application/json" ^
+  -d "{\"keywords\":[\"Java Developer\",\"Contract\"],\"confirmSend\":true}"
+```
+
+This searches LinkedIn again and sends emails to visible recruiter emails found in matching posts.
+
+### Send One Email
+
+Preview only:
+
+```bash
+curl -X POST http://localhost:3000/api/apply/single ^
+  -H "Content-Type: application/json" ^
+  -d "{\"to\":\"recruiter@company.com\",\"recruiterName\":\"Hiring Team\",\"jobTitle\":\"Software Engineer\",\"postUrl\":\"https://linkedin.com/jobs/view/123\"}"
+```
+
+Send:
+
+```bash
+curl -X POST http://localhost:3000/api/apply/single ^
+  -H "Content-Type: application/json" ^
+  -d "{\"to\":\"recruiter@company.com\",\"recruiterName\":\"Hiring Team\",\"jobTitle\":\"Software Engineer\",\"postUrl\":\"https://linkedin.com/jobs/view/123\",\"confirmSend\":true}"
+```
+
+### Logs
+
 ```bash
 curl http://localhost:3000/api/logs
 ```
-**Shows:** All sent/skipped applications with timestamps
 
----
+Returns application history from `applications_log.csv`.
 
-## **Configuration**
+## Project Structure
 
-Edit `.env`:
-```
-CANDIDATE_NAME=Your Name
-CANDIDATE_EMAIL=your@email.com
-CANDIDATE_PHONE=+1-555-123-4567
-RESUME_PATH=resume.pdf
-LINKEDIN_EMAIL=your_linkedin@email.com
-LINKEDIN_PASS=your_linkedin_password
-PORT=3000
-```
-
----
-
-## **Gmail Authorization** (First Time Only)
-
-When you first use `/api/apply` or `/api/apply/single`, you'll get an error with a Google authentication link.
-
-**Follow these steps:**
-1. Open the provided Google OAuth URL in your browser
-2. Click "Authorize"
-3. Copy the authorization code from the redirect URL
-4. Run the command provided in the error message
-5. Done! Token is saved, all future emails work automatically
-
----
-
-## **Server Commands**
-
-```bash
-# Start server
-npm start
-
-# Auto-restart on file changes (development)
-npm run dev
-
-# Save LinkedIn session (one-time)
-npm run login
+```text
+src/
+  server.js           Express API routes and logging
+  linkedin.js         LinkedIn search, filtering, and email extraction
+  linkedinLogin.js    LinkedIn session saver
+  gmail.js            Gmail OAuth client
+  gmailAuthAuto.js    Browser-based Gmail OAuth setup
+  gmailAuthManual.js  Manual Gmail OAuth setup
+  mailer.js           Email body, MIME attachment, and Gmail send
+test/
+  linkedin.test.js
+  mailer.test.js
+  server.test.js
 ```
 
----
+Generated/local files:
 
-## **Real LinkedIn vs Mock Session**
-
-**Current:** Using mock session (for testing)
-**To use real LinkedIn:**
-```bash
-npm run login
-```
-This opens a browser, logs in with your `.env` credentials, and saves the session.
-
----
-
-## **Features**
-
-✅ Search LinkedIn posts by keywords  
-✅ Extract recruiter emails from posts  
-✅ Auto-send emails with your resume  
-✅ Gmail OAuth2 integration  
-✅ Application logging to CSV  
-✅ RESTful API for all operations  
-✅ Graceful error handling  
-✅ Session persistence  
-
----
-
-## **Rate Limits & Best Practices**
-
-- **LinkedIn:** 1-2 searches/day max (avoid detection)
-- **Gmail:** 500 emails/day on free Gmail, 2000 on Workspace
-- **Posts without email:** Logged as "skipped" — use `/api/apply/single` for manual follow-up
-
----
-
-## **File Structure**
-
-```
-├── src/
-│   ├── server.js          Express app + routes
-│   ├── linkedin.js        LinkedIn scraper
-│   ├── gmail.js           Gmail OAuth2 client
-│   ├── mailer.js          Email builder
-│   └── linkedinLogin.js   Session saver
-├── .env                   Your secrets
-├── credentials.json       Gmail OAuth credentials
-├── linkedin_session.json  LinkedIn cookies
-├── resume.pdf            Your resume
-└── applications_log.csv  Auto-generated log
+```text
+.env
+credentials.json
+gmail_token.json
+linkedin_session.json
+resume.pdf
+applications_log.csv
 ```
 
----
+These are ignored by git because they contain secrets, local sessions, or private documents.
 
-## **Troubleshooting**
+## Notes
 
-| Issue | Solution |
-|-------|----------|
-| Port 3000 in use | `taskkill /IM node.exe /F` then `npm start` |
-| Resume not found | Add `resume.pdf` to project root |
-| LinkedIn session expired | Run `npm run login` |
-| Gmail auth fails | Re-download `credentials.json` from Google Cloud |
-| Timeout on LinkedIn search | Network issue — retry in a moment |
-
----
-
-**Enjoy automating your job search!** 🎯
-
-For detailed documentation, see [SETUP_GUIDE.md](SETUP_GUIDE.md)
+- Use the preview endpoints first.
+- Do not send bulk emails blindly.
+- LinkedIn may change page structure, rate limit, or require re-login.
+- Many LinkedIn jobs do not show an email; in those cases Jobify cannot extract one.
+- If Gmail sending fails with `invalid_grant`, rerun `npm run gmail-auth`.
+- If LinkedIn redirects to login or checkpoint, rerun `npm run login`.

@@ -6,6 +6,7 @@
   "scripts": {
     "start": "node src/server.js",
     "dev": "nodemon src/server.js",
+    "test": "node --test",
     "login": "node src/linkedinLogin.js",
     "gmail-auth": "node src/gmailAuthAuto.js",
     "gmail-auth-manual": "node src/gmailAuthManual.js"

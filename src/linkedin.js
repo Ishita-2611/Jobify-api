@@ -3,6 +3,30 @@ const fs = require('fs');
 const path = require('path');
 
 const SESSION_FILE = path.join(__dirname, '../linkedin_session.json');
+const EMAIL_REGEX = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g;
+
+function extractEmails(text) {
+  return [...new Set((String(text || '').match(EMAIL_REGEX) || []).map(email => email.toLowerCase()))];
+}
+
+function hasAllKeywords(text, keywords) {
+  const lowerText = String(text || '').toLowerCase();
+  return keywords.every(keyword => lowerText.includes(String(keyword).toLowerCase()));
+}
+
+function isRecentLinkedInPost(text, maxAgeHours = 24) {
+  const lowerText = String(text || '').toLowerCase();
+
+  if (/\b(now|just now|minutes?|mins?|seconds?|secs?)\b/.test(lowerText)) return true;
+
+  const hourMatch = lowerText.match(/\b(\d+)\s*(h|hr|hrs|hour|hours)\b/);
+  if (hourMatch) return Number(hourMatch[1]) <= maxAgeHours;
+
+  const dayMatch = lowerText.match(/\b(\d+)\s*(d|day|days)\b/);
+  if (dayMatch) return Number(dayMatch[1]) < 1;
+
+  return false;
+}
 
 async function searchLinkedIn(keywords) {
   if (!fs.existsSync(SESSION_FILE)) {
@@ -14,134 +38,95 @@ async function searchLinkedIn(keywords) {
     browser = await chromium.launch({ headless: true });
     const context = await browser.newContext();
 
-
-    // Load saved session
     const sessionData = JSON.parse(fs.readFileSync(SESSION_FILE, 'utf-8'));
-    await context.addCookies(sessionData.cookies);
-    if (sessionData.storageState) {
-      await context.addInitScript(() => {
-        // Restore local/session storage if needed
-      });
-    }
+    await context.addCookies(sessionData.cookies || []);
 
     const page = await context.newPage();
-
-    // Set longer timeout for page loads
     page.setDefaultTimeout(60000);
     page.setDefaultNavigationTimeout(60000);
 
-    // Search LinkedIn posts for each keyword
-    const allResults = [];
-    const keywords_str = keywords.join(' OR ');
+    const searchText = keywords.join(' ');
+    const searchUrl = `https://www.linkedin.com/search/results/posts/?keywords=${encodeURIComponent(searchText)}&sortBy=DATE_POSTED`;
 
-    // LinkedIn search URL (posts from last 24 hours)
-    const searchUrl = `https://www.linkedin.com/search/results/posts/?keywords=${encodeURIComponent(keywords_str)}&sortBy=DATE_POSTED`;
-    
     await page.goto(searchUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
-    
-    // Wait a bit more for dynamic content
     await page.waitForTimeout(3000);
-    
-    // Check if we're logged in or redirected
+
     const pageUrl = page.url();
     console.log(`[LinkedIn] Loaded URL: ${pageUrl}`);
-    
-    // Try various waits for post elements
-    await page.waitForSelector('div[class*="feed"], article, [data-id^="urn:li:activity:"], div[data-component-type="feed"]', { timeout: 5000 }).catch(() => null);
-    
-    // Wait for posts to load
+
+    if (/\/login|uas\/login|checkpoint/.test(pageUrl)) {
+      throw new Error('LinkedIn session expired. Run "npm run login" again.');
+    }
+
+    await page
+      .waitForSelector('[data-id^="urn:li:activity:"], article, div[class*="feed-item"], div[class*="update"]', { timeout: 10000 })
+      .catch(() => null);
     await page.waitForTimeout(2000);
 
-    // Extract posts with fallback selectors
     const posts = await page.evaluate(() => {
-      const results = [];
-      const debug = {};
-      
-      // Log page structure
-      debug.bodyClasses = document.body.className;
-      debug.allDivs = document.querySelectorAll('div').length;
-      debug.allArticles = document.querySelectorAll('article').length;
-      
-      // Try multiple selectors for posts
+      const debug = {
+        bodyClasses: document.body.className,
+        allDivs: document.querySelectorAll('div').length,
+        allArticles: document.querySelectorAll('article').length
+      };
+
       let postElements = document.querySelectorAll('[data-id^="urn:li:activity:"]');
       debug.urnLiActivity = postElements.length;
-      
-      // Fallback if no posts found with above selector
-      if (postElements.length === 0) {
-        postElements = document.querySelectorAll('div[class*="feed-item"]');
-        debug.feedItem = postElements.length;
-      }
-      
-      // Another fallback
-      if (postElements.length === 0) {
-        postElements = document.querySelectorAll('article');
-        debug.articles = postElements.length;
-      }
-      
-      // Try searching for containers with text content
-      if (postElements.length === 0) {
-        postElements = document.querySelectorAll('div[data-component-type*="feed"], div[class*="update"]');
-        debug.feedComponent = postElements.length;
-      }
-      
-      debug.totalElements = postElements.length;
 
-      postElements.forEach((element, index) => {
+      if (postElements.length === 0) postElements = document.querySelectorAll('article');
+      debug.articles = postElements.length;
+
+      if (postElements.length === 0) postElements = document.querySelectorAll('div[class*="feed-item"], div[class*="update"]');
+      debug.feedFallback = postElements.length;
+
+      const results = [];
+      postElements.forEach((element) => {
         const postText = element.innerText || '';
-        
         if (!postText.trim()) return;
-        
-        // Try to find email in post text
-        const emailRegex = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g;
-        const emails = postText.match(emailRegex) || [];
-        
-        // Extract recruiter name (usually in post header or first line)
-        let recruiterName = 'Unknown';
-        const lines = postText.split('\n');
-        if (lines.length > 0) {
-          recruiterName = lines[0].substring(0, 50) || 'Unknown';
-        }
 
-        // Get post URL
-        const linkElement = element.querySelector('a[href*="/posts/"]') || 
-                          element.querySelector('a[href*="/feed/"]') ||
-                          element.querySelector('a[href*="linkedin"]');
-        const postUrl = linkElement?.href || window.location.href;
+        const lines = postText.split('\n').map(line => line.trim()).filter(Boolean);
+        const recruiterName = lines[0]?.substring(0, 80) || 'Unknown';
+        const linkElement =
+          element.querySelector('a[href*="/posts/"]') ||
+          element.querySelector('a[href*="/feed/update/"]') ||
+          element.querySelector('a[href*="linkedin.com"]');
 
-        if (emails.length > 0) {
-          results.push({
-            postText: postText.substring(0, 200),
-            recruiterName,
-            emails,
-            postUrl
-          });
-        }
+        results.push({
+          postText,
+          recruiterName,
+          postUrl: linkElement?.href || window.location.href
+        });
       });
 
-      return { results, pageTitle: document.title, elementCount: postElements.length, debug };
+      return { results, elementCount: postElements.length, debug };
     });
 
-    console.log(`[LinkedIn Search] Debug:`, posts.debug);
-    console.log(`[LinkedIn Search] Found ${posts.elementCount} elements, ${posts.results.length} with emails`);
-    
-    // Format results
+    console.log('[LinkedIn Search] Debug:', posts.debug);
+    console.log(`[LinkedIn Search] Found ${posts.elementCount} elements`);
+
+    const allResults = [];
+    const seen = new Set();
+
     for (const post of posts.results) {
-      if (post.emails.length > 0) {
-        for (const email of post.emails) {
-          allResults.push({
-            recruiterName: post.recruiterName,
-            recruiterEmail: email,
-            jobTitle: post.postText.split('\n')[0].substring(0, 100) || 'Job Opportunity',
-            postText: post.postText.substring(0, 500),
-            postUrl: post.postUrl
-          });
-        }
-      } else {
+      if (!hasAllKeywords(post.postText, keywords)) continue;
+      if (!isRecentLinkedInPost(post.postText, 24)) continue;
+
+      const emails = extractEmails(post.postText);
+      for (const email of emails) {
+        const key = `${email}|${post.postUrl}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+
+        const firstMeaningfulLine = post.postText
+          .split('\n')
+          .map(line => line.trim())
+          .find(line => hasAllKeywords(line, keywords));
+
         allResults.push({
           recruiterName: post.recruiterName,
-          recruiterEmail: 'N/A',
-          jobTitle: post.postText.split('\n')[0].substring(0, 100) || 'Job Opportunity',
-          postText: post.postText.substring(0, 500),
+          recruiterEmail: email,
+          jobTitle: (firstMeaningfulLine || 'Job Opportunity').substring(0, 120),
+          postText: post.postText.substring(0, 700),
           postUrl: post.postUrl
         });
       }
@@ -149,7 +134,6 @@ async function searchLinkedIn(keywords) {
 
     await context.close();
     return allResults;
-
   } catch (error) {
     throw new Error(`LinkedIn scrape failed: ${error.message}`);
   } finally {
@@ -157,4 +141,4 @@ async function searchLinkedIn(keywords) {
   }
 }
 
-module.exports = { searchLinkedIn };
+module.exports = { extractEmails, hasAllKeywords, isRecentLinkedInPost, searchLinkedIn };

@@ -10,35 +10,74 @@ app.use(express.json());
 
 const LOGS_FILE = path.join(__dirname, '../applications_log.csv');
 
-// Initialize logs file with header if it doesn't exist
 if (!fs.existsSync(LOGS_FILE)) {
   fs.writeFileSync(LOGS_FILE, 'timestamp,recruiterName,recruiterEmail,jobTitle,postUrl,status\n');
 }
 
-// Helper: append log entry
-function logApplication(recruiterName, recruiterEmail, jobTitle, postUrl, status) {
-  const timestamp = new Date().toISOString();
-  const line = `${timestamp},"${recruiterName}","${recruiterEmail}","${jobTitle}","${postUrl}","${status}"\n`;
-  fs.appendFileSync(LOGS_FILE, line);
+function csvEscape(value) {
+  const text = String(value ?? '');
+  if (/[",\n\r]/.test(text)) return `"${text.replace(/"/g, '""')}"`;
+  return text;
 }
 
-// Helper: check if config files exist
+function parseCsvLine(line) {
+  const fields = [];
+  let current = '';
+  let inQuotes = false;
+
+  for (let index = 0; index < line.length; index++) {
+    const char = line[index];
+    const next = line[index + 1];
+
+    if (char === '"' && inQuotes && next === '"') {
+      current += '"';
+      index++;
+    } else if (char === '"') {
+      inQuotes = !inQuotes;
+    } else if (char === ',' && !inQuotes) {
+      fields.push(current);
+      current = '';
+    } else {
+      current += char;
+    }
+  }
+
+  fields.push(current);
+  return fields;
+}
+
+function logApplication(recruiterName, recruiterEmail, jobTitle, postUrl, status) {
+  const row = [
+    new Date().toISOString(),
+    recruiterName || 'Unknown',
+    recruiterEmail || 'N/A',
+    jobTitle || 'N/A',
+    postUrl || 'N/A',
+    status || 'unknown'
+  ].map(csvEscape).join(',');
+
+  fs.appendFileSync(LOGS_FILE, `${row}\n`);
+}
+
 function getStatus() {
+  const resumePath = path.resolve(process.env.RESUME_PATH || 'resume.pdf');
+
   return {
     status: 'ok',
     candidate: process.env.CANDIDATE_NAME || 'N/A',
-    resumeExists: fs.existsSync(process.env.RESUME_PATH || 'resume.pdf'),
+    candidateEmail: process.env.CANDIDATE_EMAIL || 'N/A',
+    resumeExists: fs.existsSync(resumePath),
+    resumePath,
     sessionExists: fs.existsSync(path.join(__dirname, '../linkedin_session.json')),
-    gmailTokenReady: fs.existsSync(path.join(__dirname, '../gmail_token.json'))
+    gmailTokenReady: fs.existsSync(path.join(__dirname, '../gmail_token.json')),
+    gmailCredentialsReady: fs.existsSync(path.join(__dirname, '../credentials.json'))
   };
 }
 
-// GET /api/status
 app.get('/api/status', (req, res) => {
   res.json(getStatus());
 });
 
-// POST /api/search
 app.post('/api/search', async (req, res) => {
   try {
     const { keywords } = req.body;
@@ -49,6 +88,8 @@ app.post('/api/search', async (req, res) => {
     const results = await searchLinkedIn(keywords);
     res.json({
       count: results.length,
+      maxAgeHours: 24,
+      notice: 'Dry run only. Use /api/apply with confirmSend=true after reviewing results.',
       results
     });
   } catch (error) {
@@ -57,16 +98,29 @@ app.post('/api/search', async (req, res) => {
   }
 });
 
-// POST /api/apply
 app.post('/api/apply', async (req, res) => {
   try {
-    const { keywords } = req.body;
+    const { keywords, confirmSend } = req.body;
     if (!keywords || !Array.isArray(keywords) || keywords.length === 0) {
       return res.status(400).json({ error: 'keywords array required' });
     }
 
     const results = await searchLinkedIn(keywords);
-    let sent = 0, skipped = 0, errors = 0;
+    const sendable = results.filter(result => result.recruiterEmail && result.recruiterEmail !== 'N/A');
+
+    if (!confirmSend) {
+      return res.json({
+        sent: 0,
+        readyToSend: sendable.length,
+        total: results.length,
+        notice: 'No emails sent. Review these matches, then call again with confirmSend=true.',
+        results
+      });
+    }
+
+    let sent = 0;
+    let skipped = 0;
+    let errors = 0;
     const responses = [];
 
     for (const result of results) {
@@ -75,25 +129,27 @@ app.post('/api/apply', async (req, res) => {
           responses.push({
             recruiterName: result.recruiterName,
             recruiterEmail: 'N/A',
-            status: 'skipped — no email in post'
+            status: 'skipped - no email in post'
           });
-          logApplication(result.recruiterName, 'N/A', result.jobTitle, result.postUrl, 'skipped — no email');
+          logApplication(result.recruiterName, 'N/A', result.jobTitle, result.postUrl, 'skipped - no email');
           skipped++;
-        } else {
-          const messageId = await sendEmail(
-            result.recruiterEmail,
-            result.recruiterName,
-            result.jobTitle,
-            result.postUrl
-          );
-          responses.push({
-            recruiterName: result.recruiterName,
-            recruiterEmail: result.recruiterEmail,
-            status: `sent (id=${messageId.substring(0, 5)}...)`
-          });
-          logApplication(result.recruiterName, result.recruiterEmail, result.jobTitle, result.postUrl, `sent (id=${messageId})`);
-          sent++;
+          continue;
         }
+
+        const messageId = await sendEmail(
+          result.recruiterEmail,
+          result.recruiterName,
+          result.jobTitle,
+          result.postUrl
+        );
+
+        responses.push({
+          recruiterName: result.recruiterName,
+          recruiterEmail: result.recruiterEmail,
+          status: `sent (id=${messageId.substring(0, 5)}...)`
+        });
+        logApplication(result.recruiterName, result.recruiterEmail, result.jobTitle, result.postUrl, `sent (id=${messageId})`);
+        sent++;
       } catch (err) {
         console.error(`Error sending to ${result.recruiterEmail}:`, err);
         responses.push({
@@ -119,12 +175,19 @@ app.post('/api/apply', async (req, res) => {
   }
 });
 
-// POST /api/apply/single
 app.post('/api/apply/single', async (req, res) => {
   try {
-    const { to, recruiterName, jobTitle, postUrl } = req.body;
+    const { to, recruiterName, jobTitle, postUrl, confirmSend } = req.body;
     if (!to || !recruiterName) {
       return res.status(400).json({ error: 'to and recruiterName required' });
+    }
+
+    if (!confirmSend) {
+      return res.json({
+        sent: false,
+        notice: 'No email sent. Review the payload, then call again with confirmSend=true.',
+        draft: { to, recruiterName, jobTitle: jobTitle || 'N/A', postUrl: postUrl || 'N/A' }
+      });
     }
 
     const messageId = await sendEmail(to, recruiterName, jobTitle || 'N/A', postUrl || 'N/A');
@@ -141,27 +204,17 @@ app.post('/api/apply/single', async (req, res) => {
   }
 });
 
-// GET /api/logs
 app.get('/api/logs', (req, res) => {
   try {
-    const csv = fs.readFileSync(LOGS_FILE, 'utf-8');
-    const lines = csv.trim().split('\n');
-    const logs = [];
+    const csv = fs.readFileSync(LOGS_FILE, 'utf-8').trim();
+    if (!csv) return res.json({ count: 0, logs: [] });
 
-    for (let i = 1; i < lines.length; i++) {
-      // Simple CSV parser (assumes fields are quoted if they contain commas)
-      const match = lines[i].match(/(.+?),"(.+?)","(.+?)","(.+?)","(.+?)","(.+?)"/);
-      if (match) {
-        logs.push({
-          timestamp: match[1],
-          recruiterName: match[2],
-          recruiterEmail: match[3],
-          jobTitle: match[4],
-          postUrl: match[5],
-          status: match[6]
-        });
-      }
-    }
+    const lines = csv.split(/\r?\n/);
+    const headers = parseCsvLine(lines[0]);
+    const logs = lines.slice(1).map(line => {
+      const fields = parseCsvLine(line);
+      return Object.fromEntries(headers.map((header, index) => [header, fields[index] || '']));
+    });
 
     res.json({
       count: logs.length,
@@ -173,8 +226,12 @@ app.get('/api/logs', (req, res) => {
   }
 });
 
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
-  console.log(`Status: ${JSON.stringify(getStatus())}`);
-});
+if (require.main === module) {
+  const PORT = process.env.PORT || 3000;
+  app.listen(PORT, () => {
+    console.log(`Server running on port ${PORT}`);
+    console.log(`Status: ${JSON.stringify(getStatus())}`);
+  });
+}
+
+module.exports = { app, csvEscape, getStatus, logApplication, parseCsvLine };
